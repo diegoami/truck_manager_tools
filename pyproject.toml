@@ -5,7 +5,6 @@ description = "Modular CLI tools that support playing the game Truck Manager."
 requires-python = ">=3.11"
 dependencies = [
     "typer>=0.12",
-    "anthropic>=0.69",
 ]
 
 [project.scripts]

@@ -1,24 +1,24 @@
 """Claude vision call: classify a screenshot's panel type and extract every
 visible row's fields in one call. See docs/specs/trucklist-parser.md,
-"OCR approach" / "v2: Claude vision"."""
+"OCR approach" / "v3: Claude Code CLI (headless)".
 
-import base64
+Shells out to the `claude` CLI in headless mode (`-p`), rather than calling
+the Anthropic API directly, so extraction draws on the user's Claude Pro/Max
+subscription quota instead of separate pay-per-token API billing. Requires
+`claude` on PATH and already logged in (`claude login`) — no
+`ANTHROPIC_API_KEY` should be set, since that switches auth to the (billed)
+API instead of the subscription session.
+"""
+
 import json
+import subprocess
 from pathlib import Path
-
-import anthropic
 
 from .schema import vision_response_schema
 
-MODEL = "claude-opus-5"
+PROMPT_TEMPLATE = """\
+Read the image at {image_path} (use your Read tool).
 
-_MEDIA_TYPES = {
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-}
-
-PROMPT = """\
 This is a screenshot from the game Truck Manager. It shows one of three \
 floating list panels, identified by its German title in the top-left, \
 below the game's top HUD bar:
@@ -52,39 +52,38 @@ visible), return an empty `trucks` array.
 
 
 def extract_rows(image_path: Path) -> dict:
-    """Classify and extract every row from one screenshot via Claude vision.
+    """Classify and extract every row from one screenshot via a headless
+    `claude -p` call.
 
     Returns {"list_type": str, "trucks": [row dicts]}, each row tagged with
     `source_image` (not `status` — that's added later, during merge).
     """
-    image_path = Path(image_path)
-    media_type = _MEDIA_TYPES.get(image_path.suffix.lower())
-    if media_type is None:
-        raise ValueError(f"unsupported image type: {image_path.suffix!r} ({image_path})")
+    image_path = Path(image_path).resolve()
+    prompt = PROMPT_TEMPLATE.format(image_path=image_path)
 
-    image_data = base64.standard_b64encode(image_path.read_bytes()).decode("utf-8")
-
-    client = anthropic.Anthropic()
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=16000,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {"type": "base64", "media_type": media_type, "data": image_data},
-                    },
-                    {"type": "text", "text": PROMPT},
-                ],
-            }
+    result = subprocess.run(
+        [
+            "claude",
+            "-p",
+            prompt,
+            "--output-format",
+            "json",
+            "--json-schema",
+            json.dumps(vision_response_schema()),
+            "--allowedTools",
+            "Read",
         ],
-        output_config={"format": {"type": "json_schema", "schema": vision_response_schema()}},
+        capture_output=True,
+        text=True,
     )
-    text = next(block.text for block in response.content if block.type == "text")
-    result = json.loads(text)
+    if result.returncode != 0:
+        raise RuntimeError(f"claude -p failed for {image_path} (exit {result.returncode}): {result.stderr}")
 
-    for truck in result["trucks"]:
+    response = json.loads(result.stdout)
+    if response.get("is_error"):
+        raise RuntimeError(f"claude -p reported an error for {image_path}: {response}")
+
+    data = response["structured_output"]
+    for truck in data["trucks"]:
         truck["source_image"] = image_path.name
-    return result
+    return data

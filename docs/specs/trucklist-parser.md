@@ -114,7 +114,7 @@ model call would produce) found every field trivially legible with zero
 ambiguity — confirming the ceiling here isn't image quality, it's the
 approach. Decision: replace classical OCR with a vision-capable LLM call.
 
-### v2: Claude vision (current)
+### v2: Claude vision via the Anthropic API (tried, superseded by cost)
 
 One Claude API call per screenshot: send the image plus a description of the
 three panel types and their column layouts, constrain the response with
@@ -123,21 +123,53 @@ three panel types and their column layouts, constrain the response with
 classification and every field's extraction happen in that one call. This
 removes row/column pixel calibration, per-field OCR tuning, and
 language/threshold selection entirely; the model reads the panel the way a
-person would.
+person would, and accuracy was verified 28/28 correct against a manual
+transcription of a full screenshot, including every case that broke
+tesseract (cargo values, umlauts).
 
-- **Model**: `claude-opus-5`, called via the `anthropic` Python SDK (not the
-  `claude` CLI — that's an interactive coding agent, not suited to scripted
-  structured-extraction calls; the API's native image content blocks and
-  `output_config` json_schema are purpose-built for this).
-- **Auth**: needs an `ANTHROPIC_API_KEY` (separate from any Claude Code
-  auth) set in the environment running `trucklist parse`/`run`.
-- **Cost/latency**: one call per screenshot, so a handful of calls per batch
-  — negligible either way for this project's volume.
-- **Schema**: the JSON schema requested from the model is the same
-  kitchen-sink shape as `trucks.json` (see Combined list, below) — every
-  field from every list type, nullable, plus `list_type`. A given screenshot
-  only ever shows one panel type, so only that type's fields come back
-  populated; this sidesteps needing three separate request schemas.
+The catch: this uses `claude-opus-5` via the `anthropic` Python SDK, billed
+against the Anthropic Console's separate pay-per-token API credits — not
+covered by a Claude Pro/Max subscription. Running it against both sample
+batches (~12 screenshots) cost about €1.60. Fine for a one-off test, not
+something to run "all the time" for a hobby tool with a subscription
+already paid for. Superseded by v3.
+
+### v3: Claude Code CLI, headless (current)
+
+Same call shape (image in, `{list_type, trucks: [...]}` out, one call per
+screenshot) but via the `claude` CLI's headless mode instead of the API
+directly:
+
+```
+claude -p "<prompt>" --output-format json --json-schema '<schema>' --allowedTools Read
+```
+
+The prompt tells Claude to read the image at a given absolute path with its
+Read tool (there's no dedicated CLI flag for attaching an image, unlike the
+API); `--json-schema` gets the same structured-output guarantee as
+`output_config` on the API, surfaced as the response's `structured_output`
+field; `--allowedTools Read` restricts the session to read-only.
+
+- **Auth / cost**: as long as `ANTHROPIC_API_KEY` is **not** set, `claude
+  -p` authenticates via the logged-in session (`claude login`) and draws on
+  Claude Pro/Max subscription quota — not the pay-per-token API. The
+  response reports a `total_cost_usd` figure, but that's an informational
+  equivalent-API-cost estimate, not an actual charge, under subscription
+  auth. Verified: re-ran the same extraction that cost €1.60 via the API,
+  with identical 28/28 accuracy, no separate billing.
+- **Latency**: noticeably slower than the direct API — around 35-40s per
+  screenshot, versus a few seconds for the API call. Headless mode loads
+  Claude Code's full agent context (system prompt, tool definitions, etc.)
+  on every invocation; there's no lean "just answer this one thing" mode
+  available while still authenticating via the subscription (`--bare` mode
+  strips that overhead but forces `ANTHROPIC_API_KEY` auth, defeating the
+  purpose). Acceptable for this tool's occasional-batch use case (a few
+  minutes per batch), revisit if that changes.
+- **System dependency**: the `claude` CLI installed and logged in
+  (`claude login`) on whatever machine runs `trucklist parse`/`run` —
+  replaces the `anthropic` Python package and `ANTHROPIC_API_KEY`
+  entirely (no Python SDK dependency for this at all now).
+- **Schema**: same kitchen-sink shape as v2 — see Combined list, below.
 - **Icon-only columns** (see below) are simply omitted from the schema/
   prompt — nothing to ask the model to read.
 
@@ -268,9 +300,9 @@ pyproject.toml              # [project.scripts] trucklist = "truck_manager_tools
 src/truck_manager_tools/
   trucklist/
     cli.py                  # typer app: parse/merge/report/run
-    vision_extract.py       # Claude vision call: classify + extract per image
+    vision_extract.py       # classify + extract per image, via `claude -p` headless
     dedupe.py                # within-batch reg dedup, latest-wins merge
-    schema.py                 # field lists per list type, JSON schema for the API call
+    schema.py                 # field lists per list type, JSON schema for the vision call
     reports/
       registry.py              # {name: report_fn} map
       by_cargo.py                # v1 report
@@ -278,28 +310,27 @@ docs/specs/
   trucklist-parser.md         # this file
 ```
 
-System dependency: none (no tesseract-ocr). Needs an `ANTHROPIC_API_KEY`
-environment variable at runtime.
-Python deps: `typer`, `anthropic`.
+System dependency: the `claude` CLI, installed and logged in (`claude
+login`) — no OS packages (no tesseract-ocr), no Python SDK (no `anthropic`
+package), no API key. `ANTHROPIC_API_KEY` must specifically **not** be set,
+or extraction bills the pay-per-token API instead of using the subscription.
+Python deps: `typer` only.
 
 ## CI / automation
 
-Same two-repo shape as before, but simpler — no OS-level dependency (no
-`tesseract-ocr`), so `truck_manager_tools` no longer needs its own Docker
-image; the data repo's workflow can just check out `truck_manager_tools` and
-`uv sync` + run directly on the runner.
+Unattended CI (the `workflow_dispatch` shape sketched in earlier drafts of
+this spec) doesn't fit v3 as cleanly as it fit the API-based v2: a GitHub
+Actions runner isn't logged into the user's Claude Code session, so
+`trucklist run` there would need either `ANTHROPIC_API_KEY` (a repository
+secret, back to pay-per-token billing — defeats the reason for choosing v3)
+or a `CLAUDE_CODE_OAUTH_TOKEN` (a long-lived token generated via `claude
+setup-token` that still draws on subscription quota, but is a credential to
+generate, store as a secret, and rotate before it expires).
 
-1. **`truck_manager_data`** has a `workflow_dispatch` workflow (manual
-   trigger) that takes the batch folder name as input, checks out
-   `truck_manager_tools` as a second repo (`actions/checkout`), `uv sync`s
-   it, runs `trucklist run <batch_dir>` with `ANTHROPIC_API_KEY` from a
-   repository secret, then commits the resulting `*.json`/`reports/*` files
-   back to `main` (`git commit` + `git push`, using `GITHUB_TOKEN`).
-2. No image to build or publish, so no workflow needed in
-   `truck_manager_tools` itself for this — a plain checkout of its `main`
-   branch each run is enough, at the cost of not having a pinned/versioned
-   release of the tool (acceptable for now; revisit if that becomes a
-   problem).
+Given the tool is used occasionally and by hand today, this is left as a
+deliberately open question rather than designed now — revisit if/when
+there's an actual need to run this unattended. Until then, `trucklist run`
+is invoked locally, on a machine with an authenticated `claude` session.
 
 ## Open questions / v1 limitations (deliberately deferred)
 
@@ -315,15 +346,25 @@ image; the data repo's workflow can just check out `truck_manager_tools` and
   truck history later.
 - **No automated test suite yet** — validated so far by running against real
   sample batches and checking output by hand, not by a pytest suite.
-- **Vision extraction accuracy not yet validated at scale** — the tesseract
-  approach was disproven on real samples (see above); the vision approach's
-  own accuracy still needs the same kind of validation once implemented,
-  across more batches and both edge cases (partial rows, unusual cargo
-  types, screenshots at a different resolution than the fixed 2560x1600
-  samples seen so far — vision extraction doesn't need pixel calibration,
-  so should be far more resolution-tolerant than v1, but that's an
-  expectation to confirm, not a guarantee).
-- **Response reliability**: `output_config` json_schema constrains the
-  *shape* of the response, not its accuracy — still need to decide how to
-  handle a call that errors, times out, or (rare but possible) returns a
-  row count that doesn't match what's visible, e.g. a retry policy.
+- **Vision extraction accuracy validated on two batches, not at scale** —
+  28/28 rows correct against a manual transcription (both the API and CLI
+  variants, identical output), and a clean 6-category `by_cargo` report
+  where tesseract produced 26 noisy near-duplicates. Not yet tested across
+  more batches, edge cases (partial rows, unusual cargo types), or
+  screenshots at a resolution other than the fixed 2560x1600 samples seen so
+  far — vision extraction doesn't need pixel calibration, so should be far
+  more resolution-tolerant than v1, but that's an expectation to confirm,
+  not a guarantee.
+- **Response reliability**: `--json-schema` constrains the response's
+  *shape*, not its accuracy — still need to decide how to handle a call
+  that errors, times out, or (rare but possible) returns a row count that
+  doesn't match what's visible, e.g. a retry policy. `vision_extract.py`
+  currently raises on a non-zero exit or an `is_error` response and doesn't
+  retry.
+- **Headless-mode vision via a file-path prompt is a workaround**, not a
+  documented, first-class CLI feature (there's no dedicated "attach an
+  image" flag) — it works because Claude's Read tool loads the file when
+  told to, but a future CLI version could change how that behaves.
+- **Per-call latency** (~35-40s) means a full batch takes several minutes;
+  fine for occasional manual runs, would need reworking (parallel calls, or
+  back to `--bare` + API billing) if usage grows.
