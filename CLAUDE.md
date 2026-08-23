@@ -25,10 +25,11 @@ generated output belongs here.
 
 ## Tools
 
-- **`trucklist`** (spec only, not yet implemented) — parses batches of Truck
-  Manager screenshots (the Unterwegs/Ausstehend/Im Leerlauf list panels) into
-  structured JSON, merges them into one combined truck list, and generates
-  reports. Spec: [docs/specs/trucklist-parser.md](docs/specs/trucklist-parser.md).
+- **`trucklist`** — parses batches of Truck Manager screenshots (the
+  Unterwegs/Ausstehend/Im Leerlauf list panels) into structured JSON, merges
+  them into one combined truck list, and generates reports. Usage:
+  [README.md](README.md). Design/history:
+  [docs/specs/trucklist-parser.md](docs/specs/trucklist-parser.md).
 
 ## Related repo: truck_manager_data
 
