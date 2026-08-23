@@ -87,7 +87,10 @@ from) alongside its data columns — needed both for the dedup rule above and
 for the cross-list merge in the next step.
 
 Icon-only columns (`Typ` route-type bar, `Status` wrench/lightning/clock on
-the processing list) are **skipped in v1** — not extracted at all.
+the processing list) are **skipped in v1** — not extracted at all. The
+waiting list also has a trailing `Zeit` header column, observed always empty
+(`-`) in sample data with no clear meaning yet; treated the same as an
+icon-only column and skipped.
 
 ## Field schemas (v1 — raw strings, `reg` is the dedup key)
 

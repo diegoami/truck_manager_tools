@@ -23,13 +23,16 @@ MIN_ROW_VISIBLE = ROW_HEIGHT // 2  # a row must have at least this much room bef
 
 # Header label clustering: gaps below this (px) are treated as spaces within
 # one multi-word label (e.g. "Fracht" + "an" + "Bord"); larger gaps are
-# treated as the boundary between two columns' headers.
-LABEL_WORD_GAP = 30
+# treated as the boundary between two columns' headers. Calibrated against
+# the sample batch: intra-label word gaps observed up to 12px, the tightest
+# real inter-column gap observed (waiting panel, "Last" -> "Die") is 29px.
+LABEL_WORD_GAP = 20
 
-# Column headers with no text data to extract (icons only) — dropped after
+# Column headers with no text data to extract (icons only, or — for "Zeit"
+# on the waiting panel — always empty in samples so far) — dropped after
 # clustering, before the remaining headers are matched positionally to a
 # list type's field names.
-ICON_COLUMN_LABELS = {"Typ", "Status"}
+ICON_COLUMN_LABELS = {"Typ", "Status", "Zeit"}
 
 _MIN_CONF = 40
 _ROW_TEXT_HEIGHT = (12, 28)  # filters out icon-glyph OCR noise (much taller boxes, conf 0)
