@@ -2,6 +2,8 @@
 
 import re
 
+from .schema import TRUCKS_FIELDS
+
 _TIMESTAMP_RE = re.compile(r"Screenshot_(\d{8})_(\d{6})")
 
 
@@ -25,12 +27,21 @@ def dedupe_rows(rows: list[dict]) -> list[dict]:
     return list(latest.values())
 
 
+def _normalize(row: dict, status: str) -> dict:
+    """Fill every trucks.json union field, `null` where this row's status
+    doesn't carry that field, per the spec's combined-list schema."""
+    full = dict.fromkeys(TRUCKS_FIELDS)
+    full.update(row)
+    full["status"] = status
+    return full
+
+
 def merge_lists(travelling: list[dict], waiting: list[dict], processing: list[dict]) -> list[dict]:
     """Union the three per-type lists into one row-per-truck list, tagging `status`
     and resolving cross-list `reg` conflicts (latest source_image wins, whole row)."""
     tagged = (
-        [{**row, "status": "travelling"} for row in travelling]
-        + [{**row, "status": "waiting"} for row in waiting]
-        + [{**row, "status": "processing"} for row in processing]
+        [_normalize(row, "travelling") for row in travelling]
+        + [_normalize(row, "waiting") for row in waiting]
+        + [_normalize(row, "processing") for row in processing]
     )
     return dedupe_rows(tagged)

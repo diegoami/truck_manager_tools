@@ -90,14 +90,17 @@ Icon-only columns (`Typ` route-type bar, `Status` wrench/lightning/clock on
 the processing list) are **skipped in v1** — not extracted at all. The
 waiting list also has a trailing `Zeit` header column, observed always empty
 (`-`) in sample data with no clear meaning yet; treated the same as an
-icon-only column and skipped.
+icon-only column and skipped. The travelling list's `Fortschritt` column is
+icon-only too (a vehicle icon, no percentage text) in all sample data —
+also skipped; `completed_pct` (`Abgeschlossen`) is the real progress
+percentage for that list.
 
 ## Field schemas (v1 — raw strings, `reg` is the dedup key)
 
 Every row also carries `source_image` (see dedup rule above).
 
 **travelling** (Unterwegs)
-`reg, route, origin, destination, cargo, cargo_onboard, progress_pct, completed_pct, eta, source_image`
+`reg, route, origin, destination, cargo, cargo_onboard, completed_pct, eta, source_image`
 
 **waiting** (Im Leerlauf)
 `reg, tuv, wear_pct, route, origin, destination, cargo, max_load, demand_today, source_image`
@@ -115,7 +118,7 @@ current state.
   `status` field (`travelling` / `waiting` / `processing`). Fields that don't
   apply to a given truck's status are `null`:
 
-  `reg, status, route, origin, destination, location, cargo, cargo_onboard, max_load, demand_today, progress_pct, completed_pct, eta, tuv, wear_pct, ready_in, source_image`
+  `reg, status, route, origin, destination, location, cargo, cargo_onboard, max_load, demand_today, completed_pct, eta, tuv, wear_pct, ready_in, source_image`
 
 - **Cross-list conflict resolution**: the same `reg` can legitimately appear
   in two different type-lists within one batch (a truck finishes travelling
