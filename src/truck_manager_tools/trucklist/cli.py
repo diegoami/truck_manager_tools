@@ -10,10 +10,10 @@ from pathlib import Path
 
 import typer
 
-from .classify import classify_image
 from .dedupe import dedupe_rows, merge_lists
-from .extract import extract_rows
 from .reports.registry import REPORTS
+from .schema import project_row
+from .vision_extract import extract_rows
 
 # Importing this module registers the "by_cargo" report.
 from .reports import by_cargo  # noqa: F401
@@ -52,18 +52,20 @@ def _to_markdown_table(rows: list[dict]) -> str:
 def _do_parse(batch_dir: Path, data_root: Path | None) -> None:
     out_root = _data_root(data_root) / batch_dir.name
 
-    images_by_type: dict[str, list[Path]] = {}
+    rows_by_type: dict[str, list[dict]] = {}
+    images_by_type: dict[str, list[str]] = {}
     for image_path in sorted(batch_dir.iterdir()):
         if image_path.suffix.lower() not in _IMAGE_SUFFIXES:
             continue
-        list_type = classify_image(image_path)
-        images_by_type.setdefault(list_type, []).append(image_path)
+        result = extract_rows(image_path)
+        list_type = result["list_type"]
+        rows_by_type.setdefault(list_type, []).extend(
+            project_row(truck, list_type) for truck in result["trucks"]
+        )
+        images_by_type.setdefault(list_type, []).append(image_path.name)
 
     extracted_at = datetime.now().isoformat(timespec="seconds")
-    for list_type, images in images_by_type.items():
-        rows = []
-        for image_path in images:
-            rows.extend(extract_rows(image_path, list_type))
+    for list_type, rows in rows_by_type.items():
         deduped = dedupe_rows(rows)
         out_path = out_root / f"{list_type}.json"
         _write_json(
@@ -71,7 +73,7 @@ def _do_parse(batch_dir: Path, data_root: Path | None) -> None:
             {
                 "list_type": list_type,
                 "batch": batch_dir.name,
-                "source_images": [image.name for image in images],
+                "source_images": images_by_type[list_type],
                 "extracted_at": extracted_at,
                 "trucks": deduped,
             },

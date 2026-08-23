@@ -280,8 +280,7 @@ docs/specs/
 
 System dependency: none (no tesseract-ocr). Needs an `ANTHROPIC_API_KEY`
 environment variable at runtime.
-Python deps: `typer`, `pillow` (image loading/base64 encoding only, no
-OCR-specific processing), `anthropic`.
+Python deps: `typer`, `anthropic`.
 
 ## CI / automation
 
