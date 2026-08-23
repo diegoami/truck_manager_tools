@@ -60,40 +60,113 @@ metadata object:
 }
 ```
 
+## OCR approach
+
+### v1: tesseract (tried, superseded)
+
+The first implementation used classical OCR: `pytesseract` (tesseract-ocr)
+against pixel crops of each row/column, with row and column boundaries
+computed from calibrated pixel offsets and per-image header-word detection.
+
+This got the pipeline running end-to-end (classify → locate rows/columns →
+per-cell OCR → dedupe → merge → report all worked), but accuracy on the most
+important field, `cargo`, was unacceptably poor, and getting there took
+fixing a long chain of classical-CV failure modes, each narrower than the
+last:
+
+- **psm mode**: tesseract's "single line" mode (psm 7) reads these UI cells
+  worse than "uniform block" mode (psm 6), despite each cell holding exactly
+  one line.
+- **Contrast**: light text on this game's dark, semi-transparent panel needed
+  grayscale + upscaling + hard binarization to read reliably at all — and the
+  right binarization threshold turned out to vary by context (header text in
+  the sorted-column highlight color needed a different threshold than
+  regular white cell text; a threshold tuned for one broke the other).
+- **Icon bleed**: the `Typ` column's truck-icon graphic is visually wider
+  than its "Typ" header text, so header-text-based column boundaries bled
+  icon pixels into the `reg` column's crop.
+- **Background bleed**: the panel's transparency lets faint map labels show
+  through; a column boundary that ran to the image edge occasionally picked
+  up a stray map label next to the real value.
+- **Digit ambiguity**: some digit shapes in this font are genuinely
+  confusable — "3" misread as "5", "1" misread as capital "I" — separate
+  from any of the above, and not fixable by threshold tuning.
+- **Header detection flakiness**: a single header word would occasionally
+  drop below tesseract's confidence threshold on one screenshot and not
+  another, breaking the column-count validation that the rest of the
+  pipeline depended on.
+- **The `cargo` breaking issue**: cargo values are short abbreviations
+  (`Tro`, `Gra`, `Mas`, `Bau`, `Küh`, `Gef`) rendered on a colored pill
+  badge. Even once every crop was pixel-clean, tesseract's German-language
+  model (`deu`) would still misread some of these outright — e.g. a
+  perfectly legible "Mas" badge consistently read as "NER". Testing showed
+  this wasn't dictionary-correction (disabling tesseract's word lists didn't
+  change it) — it's that `deu` and `eng` are separately-trained character
+  recognition models, and `eng` simply generalizes better to this font,
+  independent of the text being German words. Switching the OCR language
+  fixed this one case, but by that point the pattern was clear: every fix
+  uncovered a new, narrower failure mode, because pixel-threshold heuristics
+  are fundamentally brittle against a UI with icons, colored badges, and
+  uneven contrast.
+
+Manually reading a full screenshot by eye (as a stand-in for what a vision
+model call would produce) found every field trivially legible with zero
+ambiguity — confirming the ceiling here isn't image quality, it's the
+approach. Decision: replace classical OCR with a vision-capable LLM call.
+
+### v2: Claude vision (current)
+
+One Claude API call per screenshot: send the image plus a description of the
+three panel types and their column layouts, constrain the response with
+`output_config: {format: {type: "json_schema", ...}}` (Claude Messages API
+"structured outputs"), and get back `{list_type, trucks: [...]}` directly —
+classification and every field's extraction happen in that one call. This
+removes row/column pixel calibration, per-field OCR tuning, and
+language/threshold selection entirely; the model reads the panel the way a
+person would.
+
+- **Model**: `claude-opus-5`, called via the `anthropic` Python SDK (not the
+  `claude` CLI — that's an interactive coding agent, not suited to scripted
+  structured-extraction calls; the API's native image content blocks and
+  `output_config` json_schema are purpose-built for this).
+- **Auth**: needs an `ANTHROPIC_API_KEY` (separate from any Claude Code
+  auth) set in the environment running `trucklist parse`/`run`.
+- **Cost/latency**: one call per screenshot, so a handful of calls per batch
+  — negligible either way for this project's volume.
+- **Schema**: the JSON schema requested from the model is the same
+  kitchen-sink shape as `trucks.json` (see Combined list, below) — every
+  field from every list type, nullable, plus `list_type`. A given screenshot
+  only ever shows one panel type, so only that type's fields come back
+  populated; this sidesteps needing three separate request schemas.
+- **Icon-only columns** (see below) are simply omitted from the schema/
+  prompt — nothing to ask the model to read.
+
 ## Pipeline
 
-1. **Classify** each image by list type: OCR the panel title text (top-left,
-   below the HUD bar) and match against `{Unterwegs, Ausstehend, Im Leerlauf}`.
-2. **Locate table rows**: find the header row, then step down in row-height
-   increments (calibrated against known sample screenshots) until the bottom
-   of the panel/table area. This is the trickiest part to get robust — see
-   Open Questions.
-3. **Slice columns**: OCR the header row to get each column label's x-range,
-   use those (with padding) to crop each data row into per-column cells.
-4. **OCR each cell** (tesseract via pytesseract), per-column tuned (e.g.
-   numeric whitelist for weight/percentage columns, single-line PSM).
-5. **Store raw text per field** — no numeric/unit parsing in v1 (see Open
-   Questions). Just cleaned-up strings (trimmed whitespace).
-6. **Dedupe within the batch**: group all extracted rows by list type across
+1. **Extract**: for each image in the batch, one Claude vision call returns
+   `{list_type, trucks: [...]}` — every row's fields as raw strings (no
+   numeric/unit parsing in v1, see Open Questions), each tagged with
+   `source_image`.
+2. **Dedupe within the batch**: group all extracted rows by list type across
    every image in the folder, drop duplicate `reg` values — **latest image
    wins** (compare by the timestamp embedded in the screenshot filename,
    `Screenshot_YYYYMMDD_HHMMSS.jpg`; a truck's state can change between
    overlapping screenshots, so the most recent capture is the source of
    truth).
-7. **Write** one JSON file per list type present in the batch.
+3. **Write** one JSON file per list type present in the batch.
 
 Every extracted row carries a `source_image` field (the filename it came
 from) alongside its data columns — needed both for the dedup rule above and
 for the cross-list merge in the next step.
 
 Icon-only columns (`Typ` route-type bar, `Status` wrench/lightning/clock on
-the processing list) are **skipped in v1** — not extracted at all. The
-waiting list also has a trailing `Zeit` header column, observed always empty
-(`-`) in sample data with no clear meaning yet; treated the same as an
-icon-only column and skipped. The travelling list's `Fortschritt` column is
-icon-only too (a vehicle icon, no percentage text) in all sample data —
-also skipped; `completed_pct` (`Abgeschlossen`) is the real progress
-percentage for that list.
+the processing list) are **skipped** — not extracted at all. The waiting
+list also has a trailing `Zeit` header column, observed always empty (`-`)
+in sample data with no clear meaning yet; treated the same as an icon-only
+column and skipped. The travelling list's `Fortschritt` column is icon-only
+too (a vehicle icon, no percentage text) in all sample data — also skipped;
+`completed_pct` (`Abgeschlossen`) is the real progress percentage for that
+list.
 
 ## Field schemas (v1 — raw strings, `reg` is the dedup key)
 
@@ -195,11 +268,9 @@ pyproject.toml              # [project.scripts] trucklist = "truck_manager_tools
 src/truck_manager_tools/
   trucklist/
     cli.py                  # typer app: parse/merge/report/run
-    classify.py            # panel-type detection
-    layout.py               # row/column calibration
-    extract.py              # OCR + cell parsing
+    vision_extract.py       # Claude vision call: classify + extract per image
     dedupe.py                # within-batch reg dedup, latest-wins merge
-    schema.py                 # field lists per list type
+    schema.py                 # field lists per list type, JSON schema for the API call
     reports/
       registry.py              # {name: report_fn} map
       by_cargo.py                # v1 report
@@ -207,52 +278,53 @@ docs/specs/
   trucklist-parser.md         # this file
 ```
 
-System dependency: `tesseract-ocr` (not installed yet — `apt install tesseract-ocr`).
-Python deps: `typer`, `pillow`, `pytesseract`.
+System dependency: none (no tesseract-ocr). Needs an `ANTHROPIC_API_KEY`
+environment variable at runtime.
+Python deps: `typer`, `pillow` (image loading/base64 encoding only, no
+OCR-specific processing), `anthropic`.
 
 ## CI / automation
 
-Yes — GitHub Actions can run steps directly inside a Docker container on the
-standard hosted runners; no separate VM or external Docker host is needed.
-`tesseract-ocr` + a Python OCR pipeline is lightweight (seconds per image),
-well within free-tier Actions minutes.
+Same two-repo shape as before, but simpler — no OS-level dependency (no
+`tesseract-ocr`), so `truck_manager_tools` no longer needs its own Docker
+image; the data repo's workflow can just check out `truck_manager_tools` and
+`uv sync` + run directly on the runner.
 
-The wrinkle is that tools and data live in **two separate repos**. Recommended
-shape:
-
-1. **`truck_manager_tools`** has a `Dockerfile` (tesseract + Python deps +
-   `trucklist` installed) and a workflow that builds and publishes it to GHCR
-   (`ghcr.io/diegoami/truck_manager_tools`) on push to `main` (or on tag, if
-   we want versioned releases instead of a rolling `latest`).
-2. **`truck_manager_data`** has a `workflow_dispatch` workflow (manual
-   trigger, per your answer above) that takes the batch folder name as an
-   input, runs `docker run ghcr.io/diegoami/truck_manager_tools ...` with the
-   repo checkout mounted as a volume, then commits the resulting
-   `*.json`/`reports/*` files back to `main` (`git commit` + `git push` as
-   the final step, using `GITHUB_TOKEN`).
-
-This keeps the two repos' responsibilities clean — `truck_manager_tools`
-owns and versions the processing logic and its image, `truck_manager_data`
-just consumes it — at the cost of one extra publish step when the tool
-changes. Alternative (simpler, more coupled): skip the published image and
-have the data repo's workflow check out `truck_manager_tools` as a second
-repo via `actions/checkout` and `uv sync` + run directly on the runner
-(no Docker layer at all). Worth deciding once the CLI itself exists and we
-know how heavy the dependencies are — flagging both options here rather than
-locking it in now.
+1. **`truck_manager_data`** has a `workflow_dispatch` workflow (manual
+   trigger) that takes the batch folder name as input, checks out
+   `truck_manager_tools` as a second repo (`actions/checkout`), `uv sync`s
+   it, runs `trucklist run <batch_dir>` with `ANTHROPIC_API_KEY` from a
+   repository secret, then commits the resulting `*.json`/`reports/*` files
+   back to `main` (`git commit` + `git push`, using `GITHUB_TOKEN`).
+2. No image to build or publish, so no workflow needed in
+   `truck_manager_tools` itself for this — a plain checkout of its `main`
+   branch each run is enough, at the cost of not having a pinned/versioned
+   release of the tool (acceptable for now; revisit if that becomes a
+   problem).
 
 ## Open questions / v1 limitations (deliberately deferred)
 
-- **Row/column calibration** is resolution-dependent; v1 assumes the fixed
-  2560x1600 game resolution seen in the sample batch (`trucklists/1`). If the
-  user captures at a different resolution/window size, calibration breaks.
 - **No numeric/unit parsing** — e.g. `"26,265 kg"`, `"87.7 m3"`, `"61:00:18"`
   elapsed time, `"204,873 /257,403 kg"` demand fractions are stored as raw
-  OCR'd strings, not split into typed value+unit fields. Fast-follow once the
-  raw extraction is proven reliable.
+  strings, not split into typed value+unit fields. Fast-follow once the raw
+  extraction is proven reliable.
 - **Icon columns skipped** — `route_type` (Linie/Langstrecke bar color) and
   `status` (repair/charging/pending-cargo icon) are not captured in v1.
 - **Cross-batch dedup** is out of scope — re-running on overlapping sessions
   captured in different folders will produce separate, potentially
   overlapping truck entries. Revisit if the user wants an accumulating master
   truck history later.
+- **No automated test suite yet** — validated so far by running against real
+  sample batches and checking output by hand, not by a pytest suite.
+- **Vision extraction accuracy not yet validated at scale** — the tesseract
+  approach was disproven on real samples (see above); the vision approach's
+  own accuracy still needs the same kind of validation once implemented,
+  across more batches and both edge cases (partial rows, unusual cargo
+  types, screenshots at a different resolution than the fixed 2560x1600
+  samples seen so far — vision extraction doesn't need pixel calibration,
+  so should be far more resolution-tolerant than v1, but that's an
+  expectation to confirm, not a guarantee).
+- **Response reliability**: `output_config` json_schema constrains the
+  *shape* of the response, not its accuracy — still need to decide how to
+  handle a call that errors, times out, or (rare but possible) returns a
+  row count that doesn't match what's visible, e.g. a retry policy.
